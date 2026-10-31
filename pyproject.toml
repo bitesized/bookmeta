@@ -1,0 +1,20 @@
+[project]
+name = "bookmeta"
+version = "0.1.0"
+description = "TUI that fetches, verifies and writes high-quality metadata into a KOReader EPUB library"
+requires-python = ">=3.12"
+dependencies = [
+    "textual>=0.80",
+    "httpx>=0.27",
+    "lxml>=5.2",
+    "pillow>=10.4",
+    "rapidfuzz>=3.9",
+    "anthropic>=2.3.0",
+]
+
+[project.scripts]
+bookmeta = "bookmeta.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
