@@ -2,6 +2,8 @@
 name = "bookmeta"
 version = "0.1.0"
 description = "TUI that fetches, verifies and writes high-quality metadata into a KOReader EPUB library"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "textual>=0.80",

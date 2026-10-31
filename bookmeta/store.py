@@ -92,6 +92,66 @@ def custom_metadata(book: Path) -> bool:
     return (sidecar_dir(book) / "custom_metadata.lua").exists()
 
 
+def custom_fields(book: Path) -> dict[str, str]:
+    """The values KOReader shows instead of the file's (the `custom_props` table of custom_metadata.lua)."""
+    try:
+        text = (sidecar_dir(book) / "custom_metadata.lua").read_text(errors="replace")
+    except OSError:
+        return {}
+    m = re.search(r'\["custom_props"\]\s*=\s*\{(.*?)\n\s*\}', text, re.S)
+    if not m:
+        return {}
+    found = re.findall(r'\["(\w+)"\]\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^,\n]+))', m.group(1))
+    return {k: (q.replace("\\n", " ").replace('\\"', '"') if q else bare.strip()) for k, q, bare in found}
+
+
+def remove_custom_metadata(book: Path, library: Path, root: Path) -> bool:
+    """Move the book's custom_metadata.lua into the backups folder (so KOReader shows the file's own metadata
+    again) and log it. Returns False if there was nothing to remove."""
+    src = sidecar_dir(book) / "custom_metadata.lua"
+    if not src.exists():
+        return False
+    fields = custom_fields(book)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    dest = root / "backups" / "custom_metadata" / book.relative_to(library).parent / f"{book.name}.{stamp}.lua"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    src.unlink()
+    log(root, {"path": str(book), "removed": "custom_metadata.lua", "custom_props": fields, "backup": str(dest)})
+    return True
+
+
+def log(root: Path, entry: dict) -> None:
+    entry = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"), **entry}
+    with open(root / "changes.jsonl", "a") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def history(root: Path) -> dict[str, list[dict]]:
+    """Everything bookmeta has done, by book path, oldest first, from changes.jsonl."""
+    out: dict[str, list[dict]] = {}
+    try:
+        with open(root / "changes.jsonl") as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                out.setdefault(e.get("path", ""), []).append(e)
+    except OSError:
+        pass
+    return out
+
+
+def find_stats_db(library: Path) -> Path | None:
+    """KOReader's statistics.sqlite3 for a library on the device (e.g. .adds/koreader/books -> .adds/koreader/settings)."""
+    for d in (library, *library.parents):
+        for f in (d / "settings" / "statistics.sqlite3", d / ".adds" / "koreader" / "settings" / "statistics.sqlite3"):
+            if f.is_file():
+                return f
+    return None
+
+
 def partial_md5(book: Path) -> str | None:
     """The digest KOReader cached on first open; statistics and KOSync key on it."""
     sdr = sidecar_dir(book)
@@ -135,7 +195,6 @@ def apply(prop: Proposal, library: Path, root: Path, flag: str | None = "verifie
     prop.status = "applied" if flag != "kept" else "kept"
     applied = {k: (v if k != "description" else "<html>") for k, v in changes.items()}
     entry = {
-        "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "path": str(path),
         "flag": flag if flag is not None else book.flag,
         "backup": str(backup),
@@ -148,8 +207,7 @@ def apply(prop: Proposal, library: Path, root: Path, flag: str | None = "verifie
     }
     if stats_db and ("title" in changes or "authors" in changes):
         entry["stats"] = fix_statistics(stats_db, path, old, changes, root)
-    with open(root / "changes.jsonl", "a") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    log(root, entry)
     return prop
 
 
