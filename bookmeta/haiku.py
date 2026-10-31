@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -60,6 +61,44 @@ SCHEMA = {
 }
 
 
+COVER_SYSTEM = """You choose the best cover for an ebook on an e-reader. Image 0 is the book's current cover (if
+given); the rest are candidates from book stores. For every image say what is wrong with it, if anything:
+- "movie": a film/TV tie-in cover (stills, actors, "now a major motion picture")
+- "advert": banners, stickers, award or price badges, "as seen on", review quotes plastered on the art
+- "generic": blank, plain text on a flat colour, Project Gutenberg / publisher placeholder, library stamp
+- "wrong_book": clearly a different book, title or author
+- "poor": blurry, cropped, a photo of a physical book, or a scan with borders
+- "ok": none of these
+Then pick the best image: never one with a problem other than "ok" if any image is "ok". Among the "ok" ones
+prefer the most attractive, well-designed cover, even if it is from a different edition; prefer the current
+cover when it is about as good as the alternatives. Judge the design first: each image is labelled with its
+real size, but size only breaks ties between covers that look about equally good.
+Keep notes and "why" to one short sentence."""
+
+COVER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "image": {"type": "integer"},
+                    "problem": {"type": "string", "enum": ["ok", "movie", "advert", "generic", "wrong_book", "poor"]},
+                    "note": {"type": "string"},
+                },
+                "required": ["image", "problem", "note"],
+                "additionalProperties": False,
+            },
+        },
+        "best": {"type": "integer"},
+        "why": {"type": "string"},
+    },
+    "required": ["verdicts", "best", "why"],
+    "additionalProperties": False,
+}
+
+
 class HaikuError(Exception):
     pass
 
@@ -76,23 +115,16 @@ class Haiku:
     def available(self) -> bool:
         return self.client is not None
 
-    async def review(self, proposed: dict, description: str, records: list[str], filename: str, front: str) -> dict:
+    async def _ask(self, system: str, schema: dict, content, effort: str = "low") -> dict:
         import anthropic
 
-        prompt = (
-            f"PROPOSED: {json.dumps(proposed, ensure_ascii=False)}\n"
-            f"FILENAME: {filename}\n"
-            f"TITLE PAGE TEXT: {front}\n"
-            "CATALOGUE RECORDS:\n" + ("\n".join(f"- {r}" for r in records) or "(none)") + "\n\n"
-            f"DESCRIPTION:\n{description}"
-        )
         try:
             resp = await self.client.messages.create(
                 model=MODEL,
                 max_tokens=8000,
-                system=SYSTEM,
-                messages=[{"role": "user", "content": prompt}],
-                output_config={"effort": "low", "format": {"type": "json_schema", "schema": SCHEMA}},
+                system=system,
+                messages=[{"role": "user", "content": content}],
+                output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
             )
         except anthropic.APIError as e:
             raise HaikuError(str(e)) from e
@@ -103,6 +135,33 @@ class Haiku:
             return json.loads(text)
         except ValueError as e:
             raise HaikuError("unparseable response") from e
+
+    async def pick_cover(self, images: list[tuple[bytes, str]], has_current: bool, title: str, authors: str) -> dict:
+        """`images` are (JPEG thumbnail, real size) pairs; index 0 is the current cover when `has_current`. Returns
+        {"verdicts": {index: (problem, note)}, "best": index, "why": str} with indices validated."""
+        content: list = []
+        for i, (data, size) in enumerate(images):
+            label = "current cover" if i == 0 and has_current else "candidate"
+            content.append({"type": "text", "text": f"Image {i} ({label}, {size}px):"})
+            content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                         "data": base64.b64encode(data).decode()}})
+        content.append({"type": "text", "text": f"Book: {title} by {authors}"
+                        + ("" if has_current else "\nThere is no current cover; image 0 is a candidate.")})
+        out = await self._ask(COVER_SYSTEM, COVER_SCHEMA, content, effort="medium")
+        if not 0 <= out.get("best", -1) < len(images):
+            raise HaikuError("cover pick out of range")
+        verdicts = {v["image"]: (v["problem"], v["note"]) for v in out["verdicts"] if 0 <= v["image"] < len(images)}
+        return {"verdicts": verdicts, "best": out["best"], "why": out["why"]}
+
+    async def review(self, proposed: dict, description: str, records: list[str], filename: str, front: str) -> dict:
+        prompt = (
+            f"PROPOSED: {json.dumps(proposed, ensure_ascii=False)}\n"
+            f"FILENAME: {filename}\n"
+            f"TITLE PAGE TEXT: {front}\n"
+            "CATALOGUE RECORDS:\n" + ("\n".join(f"- {r}" for r in records) or "(none)") + "\n\n"
+            f"DESCRIPTION:\n{description}"
+        )
+        return await self._ask(SYSTEM, SCHEMA, prompt)
 
 
 def _letters(s: str) -> str:

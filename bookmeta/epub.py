@@ -448,18 +448,20 @@ def write_epub(
     book: Epub,
     changes: dict,
     cover: bytes | None,
-    status: str,
+    status: str | None,
     library_root: Path,
     backup_root: Path,
 ) -> Path:
-    """Rewrite the book with new metadata/cover and the verified flag. Returns the backup path."""
+    """Rewrite the book with new metadata/cover and the verified flag (left as-is when `status` is None).
+    Returns the backup path."""
     path = book.path
     with zipfile.ZipFile(path) as z:
         root = etree.fromstring(z.read(book.opf_path), _PARSER)
         _apply_meta(root, book.version, changes)
         md = _metadata_el(root)
-        _set_named_meta(md, FLAG_NAME, status)
-        _set_named_meta(md, FLAG_DATE, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        if status is not None:
+            _set_named_meta(md, FLAG_NAME, status)
+            _set_named_meta(md, FLAG_DATE, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
         replace: dict[str, bytes] = {}
         add_cover: tuple[str, bytes] | None = None
@@ -497,7 +499,7 @@ def write_epub(
 
     try:
         check = read_epub(tmp)
-        if check.flag != status:
+        if check.flag != (status if status is not None else book.flag):
             raise RuntimeError("rewritten EPUB failed verification")
     except Exception:
         tmp.unlink(missing_ok=True)

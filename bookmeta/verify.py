@@ -78,6 +78,8 @@ class Proposal:
     matched: str = ""
     changes: list[Change] = field(default_factory=list)
     cover_file: str = ""
+    cover_options: list[dict] = field(default_factory=list)  # current + candidates, for comparing with `o`
+    flag: str = ""  # the book's bookmeta:status when it was analysed
     notes: list[str] = field(default_factory=list)
     error: str = ""
 
@@ -91,6 +93,45 @@ class Proposal:
         return cls(**d)
 
 
+def _cache_cover(ctx: "Context", c: covers.CoverInfo) -> str:
+    fn = ctx.cache_dir / (hashlib.sha1(c.data).hexdigest()[:16] + ".img")
+    if not fn.exists():
+        fn.write_bytes(c.data)
+    return str(fn)
+
+
+def _cover_decision(current, fetched, options, verdict, by_isbn: bool, prop) -> covers.CoverDecision:
+    """Haiku vetoes candidates it flags (movie tie-in, adverts, placeholder, wrong book, poor scan) and may
+    prefer other artwork; anything that isn't a larger copy of the current art goes to review."""
+    if not verdict:
+        return covers.decide(current, fetched, by_isbn)
+    same = lambda a, b: a is not None and b is not None and covers.distance(a.dhash, b.dhash) <= covers.SAME_ART_MAX_DISTANCE
+    off = 1 if current else 0
+    vetoed = [options[i - off] for i, (problem, _) in verdict["verdicts"].items() if i >= off and problem != "ok"]
+    usable = [c for c in fetched if not any(same(c, v) for v in vetoed)]
+    decision = covers.decide(current, usable, by_isbn)
+    why = verdict["why"]
+    cur_problem = verdict["verdicts"].get(0, ("ok", ""))[0] if current else "ok"
+    if cur_problem != "ok":
+        prop.notes.append(f"Haiku: current cover looks like {cur_problem.replace('_', ' ')} - "
+                          f"{verdict['verdicts'][0][1]}")
+    best = verdict["best"]
+    pick = options[best - off] if best >= off else current
+    if any(pick is v for v in vetoed):
+        return decision  # every option had a problem; don't swap one flawed cover for another on Haiku's say-so
+    if decision.chosen and same(decision.chosen, pick):
+        return decision  # rules and Haiku agree
+    if same(pick, current):
+        if decision.chosen:  # rules wanted other artwork; Haiku prefers what's there
+            prop.notes.append(f"Haiku prefers the current artwork: {why}")
+        bigger = pick is not current and pick.height >= current.height * covers.UPGRADE_FACTOR
+        return covers.CoverDecision(pick if bigger else None, True,
+                                    f"same artwork, {current.height}px -> {pick.height}px" if bigger else "current cover kept")
+    if current and pick.height < current.height:
+        return decision  # never trade down in resolution on Haiku's taste alone
+    return covers.CoverDecision(pick, False, f"Haiku prefers this cover: {why}")
+
+
 @dataclass
 class Context:
     http: httpx.AsyncClient
@@ -98,6 +139,7 @@ class Context:
     cache_dir: Path
     haiku: Haiku | None = None
     include_verified: bool = False
+    covers_only: bool = False  # --covers: identify the book, then look at nothing but its cover
 
 
 def filename_hints(path: Path) -> tuple[str, str, list[str]]:
@@ -196,8 +238,8 @@ async def analyze(path: Path, ctx: Context) -> Proposal:
         prop.status, prop.error = "error", f"unreadable EPUB: {e}"
         return prop
     m = book.meta
-    prop.title, prop.authors = m.title, ", ".join(m.authors)
-    if book.flag and not ctx.include_verified:
+    prop.title, prop.authors, prop.flag = m.title, ", ".join(m.authors), book.flag or ""
+    if book.flag and not (ctx.include_verified or ctx.covers_only):
         prop.status = "flagged"
         return prop
 
@@ -250,6 +292,9 @@ async def analyze(path: Path, ctx: Context) -> Proposal:
             seen_desc.add(key)
             cleaners[f"{c.source}{len(cleaners)}"] = DescriptionCleaner(c.description)
             cleaners[f"{c.source}{len(cleaners) - 1}"].candidate = c  # type: ignore[attr-defined]
+
+    if ctx.covers_only:
+        cleaners.clear()  # no description work, so no paragraph questions for Jev
 
     questions: dict[str, dict] = {}
     best = matched[0] if matched else None
@@ -363,22 +408,33 @@ async def analyze(path: Path, ctx: Context) -> Proposal:
                 break
 
     # 6. Haiku once-over: description formatting, and mangled/merged/missing fields Jev can't see.
-    if ctx.haiku and ctx.haiku.available:
+    if ctx.haiku and ctx.haiku.available and not ctx.covers_only:
         try:
             await _haiku_pass(ctx.haiku, book, matched, changes, trusted, prop)
         except HaikuError as e:
             prop.notes.append(f"Haiku unavailable: {e}")
 
-    # 7. Cover.
+    if ctx.covers_only:
+        changes.clear()
+        prop.notes = [n for n in prop.notes if "Jev" in n]
+
+    # 7. Cover: the deterministic upgrade rules, then Haiku compares the current cover with every candidate.
     if matched:
         current_cover = covers.inspect(book.cover_bytes, source="current")
         urls = list(dict.fromkeys((u, c.source) for c in matched for u in c.cover_urls))[:6]
-        fetched = await asyncio.gather(*(covers.fetch(ctx.http, u, s) for u, s in urls))
-        decision = covers.decide(current_cover, [f for f in fetched if f], by_isbn)
+        fetched = [f for f in await asyncio.gather(*(covers.fetch(ctx.http, u, s) for u, s in urls)) if f]
+        options = covers.distinct(fetched)[:5]
+        verdict = None
+        if options and ctx.haiku and ctx.haiku.available:
+            shown = ([current_cover] if current_cover else []) + options
+            try:
+                verdict = await ctx.haiku.pick_cover(
+                    [(covers.thumbnail(c.data), f"{c.width}x{c.height}") for c in shown], bool(current_cover), m.title, ", ".join(m.authors))
+            except (HaikuError, OSError) as e:
+                prop.notes.append(f"Haiku cover check unavailable: {e}")
+        decision = _cover_decision(current_cover, fetched, options, verdict, by_isbn, prop)
         if decision.chosen:
-            fn = ctx.cache_dir / (hashlib.sha1(decision.chosen.data).hexdigest()[:16] + ".img")
-            fn.write_bytes(decision.chosen.data)
-            prop.cover_file = str(fn)
+            prop.cover_file = _cache_cover(ctx, decision.chosen)
             changes.append(Change(
                 "cover",
                 current_cover.label if current_cover else "none",
@@ -387,6 +443,16 @@ async def analyze(path: Path, ctx: Context) -> Proposal:
                 decision.auto and trusted,
                 decision.reason,
             ))
+        if options:
+            off = 1 if current_cover else 0
+            verdicts = verdict["verdicts"] if verdict else {}
+            best = verdict["best"] if verdict else -1
+            entries = ([(current_cover, "")] if current_cover else []) + [(c, _cache_cover(ctx, c)) for c in options]
+            prop.cover_options = [
+                {"file": f, "label": c.label, "source": c.source, "problem": verdicts.get(i, ("", ""))[0],
+                 "note": verdicts.get(i, ("", ""))[1], "haiku_pick": i == best, "current": i < off}
+                for i, (c, f) in enumerate(entries)
+            ]
 
     prop.changes = changes
     if not matched or identity < MIN_IDENTITY:
@@ -395,6 +461,8 @@ async def analyze(path: Path, ctx: Context) -> Proposal:
             ch.auto = False
         if not matched:
             prop.notes.append(f"{len(cands)} results, none matched '{title_for_lookup}' by {authors}")
+    elif ctx.covers_only and any(o["current"] and o["problem"] not in ("", "ok") for o in prop.cover_options):
+        prop.status = "review"  # Haiku dislikes the current cover even if no candidate beats it: let the user look
     elif not changes and trusted:
         prop.status = "ok"
     elif trusted and all(ch.auto for ch in changes):

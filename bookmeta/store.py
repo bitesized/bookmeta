@@ -47,8 +47,8 @@ def scan(library: Path) -> tuple[list[Path], list[Path]]:
 class State:
     """Proposals cached by path; an entry is reused only while the file's size and mtime are unchanged."""
 
-    def __init__(self, root: Path):
-        self.file = root / "state.json"
+    def __init__(self, root: Path, name: str = "state.json"):
+        self.file = root / name
         try:
             raw = json.loads(self.file.read_text())
         except (OSError, ValueError):
@@ -119,8 +119,9 @@ def build_changes(prop: Proposal) -> tuple[dict, bytes | None]:
     return changes, cover
 
 
-def apply(prop: Proposal, library: Path, root: Path, flag: str = "verified", stats_db: Path | None = None) -> Proposal:
-    """Write accepted changes plus the flag. `flag='kept'` writes only the flag."""
+def apply(prop: Proposal, library: Path, root: Path, flag: str | None = "verified", stats_db: Path | None = None) -> Proposal:
+    """Write accepted changes plus the flag. `flag='kept'` writes only the flag; `flag=None` writes the changes
+    and leaves the book's flag as it was (cover-only runs)."""
     path = Path(prop.path)
     book = read_epub(path)
     old = {"title": book.meta.title, "authors": book.meta.authors}
@@ -136,7 +137,7 @@ def apply(prop: Proposal, library: Path, root: Path, flag: str = "verified", sta
     entry = {
         "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "path": str(path),
-        "flag": flag,
+        "flag": flag if flag is not None else book.flag,
         "backup": str(backup),
         "changes": [
             {"field": c.field, "from": c.current, "to": c.proposed, "source": c.source}

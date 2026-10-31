@@ -108,3 +108,49 @@ def decide(current: CoverInfo | None, candidates: list[CoverInfo], identity_by_i
     best = ranked[0]
     return CoverDecision(best, identity_by_isbn and best.height >= MIN_USEFUL_HEIGHT,
                          f"{'no' if not current else 'tiny'} cover; single source")
+
+
+def distinct(candidates: list[CoverInfo]) -> list[CoverInfo]:
+    """One cover per artwork (the largest copy), largest first."""
+    out: list[CoverInfo] = []
+    for c in sorted(candidates, key=lambda c: c.width * c.height, reverse=True):
+        if all(distance(c.dhash, o.dhash) > SAME_ART_MAX_DISTANCE for o in out):
+            out.append(c)
+    return out
+
+
+def thumbnail(data: bytes, height: int = 512) -> bytes:
+    """A small JPEG for Haiku to look at (~350 tokens at 512px tall)."""
+    with Image.open(io.BytesIO(data)) as im:
+        im = im.convert("RGB")
+        if im.height > height:
+            im = im.resize((max(1, round(im.width * height / im.height)), height), Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=85)
+        return buf.getvalue()
+
+
+def montage(images: list[tuple[bytes, str]], height: int = 700) -> bytes:
+    """Covers side by side with a caption under each, for comparing in an image viewer."""
+    from PIL import ImageDraw, ImageFont
+
+    tiles = []
+    for data, _ in images:
+        with Image.open(io.BytesIO(data)) as im:
+            im = im.convert("RGB")
+            tiles.append(im.resize((max(1, round(im.width * height / im.height)), height), Image.LANCZOS))
+    pad, caption = 24, 90
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 22)
+    except OSError:
+        font = ImageFont.load_default()
+    sheet = Image.new("RGB", (sum(t.width for t in tiles) + pad * (len(tiles) + 1), height + caption + pad), "white")
+    draw = ImageDraw.Draw(sheet)
+    x = pad
+    for tile, (_, text) in zip(tiles, images):
+        sheet.paste(tile, (x, pad))
+        draw.multiline_text((x, height + pad + 8), text, fill="black", font=font, spacing=4)
+        x += tile.width + pad
+    buf = io.BytesIO()
+    sheet.save(buf, "JPEG", quality=90)
+    return buf.getvalue()

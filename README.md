@@ -24,6 +24,12 @@ result lands in one of these states:
 - **Covers** are replaced automatically only by a *larger copy of the same artwork* (perceptual
   hash match), or when the current cover is missing/tiny and two sources agree. A different
   edition's artwork always goes to review. Covers are stored at most 2000px tall.
+- **Cover comparison** (with `ANTHROPIC_API_KEY`): Haiku looks at the current cover and every distinct
+  candidate side by side and flags movie/TV tie-ins, adverts (bestseller banners, badges, review quotes),
+  blank/Gutenberg/placeholder covers, wrong books and poor scans. Flagged candidates are never chosen,
+  and Haiku picks the nicest-looking remaining cover even if it is from another edition. Its pick goes to
+  review unless it is a larger copy of the current art, and it never proposes a smaller cover than the
+  current one.
 - **Descriptions** are split into paragraphs; praise quotes, bestseller/award banners, film/TV
   tie-ins, "about the author", pasted first chapters and repeated paragraphs are removed (rules
   first, then Jev classifies the rest). If a dropped paragraph might have been synopsis, it goes
@@ -47,13 +53,15 @@ result lands in one of these states:
 ## Keys
 
 `s` scan · `a` apply the ticked changes · `k` keep the book as-is (flags it so it's skipped next
-time) · `x` skip for this session · `tab` then `space`/`enter` toggle individual fields · `o` open
-current and proposed covers in Preview · `f` cycle filter (all / review / anything needing you) ·
-`r` re-check a book · `q` quit
+time) · `x` skip for this session · `tab` then `space`/`enter` toggle individual fields · `o` compare
+covers: opens the current cover and every candidate side by side in Preview (numbered, with Haiku's
+verdicts and pick) and lets you choose one with `1`–`9` · `f` cycle filter (all / review / anything
+needing you) · `r` re-check a book · `q` quit
 
 Options: `--dry-run` (never write), `--no-auto` (review everything), `--recheck` (ignore cached
 results), `--include-verified` (re-check books already flagged as verified/kept instead of skipping
-them), `--force` (headless: re-scan and re-check the whole library with Jev and Haiku, ignoring all
+them), `--covers` (TUI that re-checks only covers across the whole library, verified books included, so
+you can compare and upgrade them; other metadata and the verified flag are left alone), `--force` (headless: re-scan and re-check the whole library with Jev and Haiku, ignoring all
 cached state, printing plain progress instead of opening the TUI), `--stats PATH` (see below).
 
 ## Configuration (`.env` in the project folder, or `~/.config/bookmeta/.env`)
@@ -61,7 +69,7 @@ cached state, printing plain progress instead of opening the TUI), `--stats PATH
 | Variable | |
 |---|---|
 | `TYPESAFE_API_KEY` | Jev, for identity checks and description cleaning. Without it, rules only and more goes to review. |
-| `ANTHROPIC_API_KEY` | Optional Claude Haiku once-over (about $0.0005 a book). Without it, this step is skipped. `BOOKMETA_HAIKU_MODEL` overrides the model. |
+| `ANTHROPIC_API_KEY` | Optional Claude Haiku once-over and cover comparison (about $0.001 a book). Without it, this step is skipped. `BOOKMETA_HAIKU_MODEL` overrides the model. |
 | `GOOGLE_BOOKS_API_KEY` | Recommended (free, Google Cloud console). The keyless quota is shared and usually exhausted. |
 | `HARDCOVER_API_KEY` (or `HARDCOVER_TOKEN`) | Recommended for **series** data (free, hardcover.app → Settings → API; expires yearly). |
 | `BOOKMETA_CONTACT` | An email for Open Library's User-Agent; raises their rate limit from 1 to 3 req/s. |

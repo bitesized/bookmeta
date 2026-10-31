@@ -16,14 +16,15 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Static
 
-from . import store
+from . import covers, store
 from .epub import read_epub
 from .haiku import Haiku
 from .jev import Jev
 from .sources import enabled_sources, make_client
-from .verify import STATUS_LABEL, Context, Proposal, analyze
+from .verify import STATUS_LABEL, Change, Context, Proposal, analyze
 
 STATUS_STYLE = {
     "pending": "dim",
@@ -46,6 +47,41 @@ def short(v, n: int = 60) -> str:
     s = ", ".join(v) if isinstance(v, list) else str(v or "")
     s = s.replace("\n", " ⏎ ")
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+class CoverPicker(ModalScreen[int | None]):
+    """Lists the covers shown side by side in the comparison sheet; a number key picks one."""
+
+    CSS = """
+    CoverPicker { align: center middle; }
+    #picker { width: 80; height: auto; border: thick $primary; background: $surface; padding: 1 2; }
+    """
+    BINDINGS = [Binding("escape", "dismiss_none", "Cancel")]
+
+    def __init__(self, options: list[dict], chosen: int):
+        super().__init__()
+        self.options, self.chosen = options, chosen
+
+    def compose(self) -> ComposeResult:
+        lines = ["[b]Choose a cover[/b] [dim](numbers match the comparison sheet in Preview)[/dim]", ""]
+        for i, o in enumerate(self.options):
+            tags = [t for t in ("current" if o["current"] else "", "Haiku's pick" if o["haiku_pick"] else "",
+                                "selected" if i == self.chosen else "") if t]
+            problem = f" [red]{o['problem'].replace('_', ' ')}[/red]" if o["problem"] not in ("", "ok") else ""
+            lines.append(f"[b]{i + 1}[/b]  {escape(o['label'])}{problem}"
+                         + (f"  [cyan]{', '.join(tags)}[/cyan]" if tags else ""))
+            if o["note"]:
+                lines.append(f"   [dim]{escape(o['note'])}[/dim]")
+        lines += ["", "[dim]1-9 choose · esc cancel[/dim]"]
+        yield Static("\n".join(lines), id="picker")
+
+    def on_key(self, event) -> None:
+        if event.character and event.character.isdigit() and 1 <= int(event.character) <= len(self.options):
+            event.stop()
+            self.dismiss(int(event.character) - 1)
+
+    def action_dismiss_none(self) -> None:
+        self.dismiss(None)
 
 
 class BookMetaApp(App):
@@ -71,16 +107,19 @@ class BookMetaApp(App):
         Binding("q", "quit", "Quit"),
     ]
 
-    def __init__(self, library: Path, dry_run: bool, auto_apply: bool, stats_db: Path | None, recheck: bool, include_verified: bool = False):
+    def __init__(self, library: Path, dry_run: bool, auto_apply: bool, stats_db: Path | None, recheck: bool,
+                 include_verified: bool = False, covers_only: bool = False):
         super().__init__()
         self.library = library.resolve()
         self.dry_run = dry_run
         self.auto_apply = auto_apply and not dry_run
         self.stats_db = stats_db
         self.recheck = recheck
-        self.include_verified = include_verified
+        self.covers_only = covers_only
+        self.include_verified = include_verified or covers_only
         self.root = store.library_dir(self.library)
-        self.state = store.State(self.root)
+        # Cover-only results are cached apart so they never stand in for a full metadata check.
+        self.state = store.State(self.root, "state-covers.json" if covers_only else "state.json")
         self.props: dict[str, Proposal] = {}
         self.order: list[str] = []
         self.unsupported: list[Path] = []
@@ -123,6 +162,8 @@ class BookMetaApp(App):
             self.order.append(str(p))
         self.rebuild()
         mode = "DRY RUN — nothing will be written" if self.dry_run else ("auto-apply on" if self.auto_apply else "auto-apply off")
+        if self.covers_only:
+            mode = f"covers only; press o to compare and pick. {mode}"
         sources = ", ".join(enabled_sources())
         self.notify(f"{len(paths)} EPUBs, {len(self.unsupported)} unsupported files skipped. Sources: {sources}. {mode}.", timeout=8)
         self.update_subtitle()
@@ -174,7 +215,7 @@ class BookMetaApp(App):
         for k in ("applied", "flagged", "ok", "auto", "review", "nomatch", "error"):
             if c[k]:
                 parts.append(f"{k} {c[k]}")
-        self.sub_title = f"{self.library.name}  ·  " + "  ".join(parts) + f"  ·  filter: {self.filter}"
+        self.sub_title = f"{self.library.name}{'  ·  covers only' if self.covers_only else ''}  ·  " + "  ".join(parts) + f"  ·  filter: {self.filter}"
 
     def current_path(self) -> str | None:
         t = self.query_one("#books", DataTable)
@@ -257,7 +298,7 @@ class BookMetaApp(App):
         self.running, self.done = True, len(self.order) - len(todo)
         self.update_subtitle()
         async with make_client() as http:
-            ctx = Context(http, Jev(http), self.root / "covers", Haiku(), self.include_verified)
+            ctx = Context(http, Jev(http), self.root / "covers", Haiku(), self.include_verified, self.covers_only)
             if not ctx.jev.available:
                 self.notify("No TYPESAFE_API_KEY: identity checks fall back to rules and descriptions are only rule-cleaned.", severity="warning", timeout=10)
             sem = asyncio.Semaphore(CONCURRENCY)
@@ -274,7 +315,7 @@ class BookMetaApp(App):
                             prop.notes.append("KOReader custom metadata (custom_metadata.lua) overrides the file's metadata")
                         self.props[path] = prop
                         self.state.put(prop)
-                    if self.auto_apply and prop.status in ("auto", "ok"):
+                    if self.auto_apply and prop.status in ("auto", "ok") and (prop.changes or not self.covers_only):
                         await self.write(prop, "verified")
                     self.done += 1
                     self.refresh_row(prop)
@@ -288,7 +329,9 @@ class BookMetaApp(App):
         n = sum(p.status in TODO for p in self.props.values())
         self.notify(f"Scan finished. {n} book(s) need your attention — press f to filter." if n else "Scan finished. Nothing needs review.")
 
-    async def write(self, prop: Proposal, flag: str) -> bool:
+    async def write(self, prop: Proposal, flag: str | None) -> bool:
+        if self.covers_only:
+            flag = None  # a new cover says nothing about the rest of the metadata: leave the flag alone
         if self.dry_run:
             self.notify("Dry run: not writing.", severity="warning")
             return False
@@ -312,6 +355,9 @@ class BookMetaApp(App):
         if prop.status == "nomatch" and not any(c.accepted for c in prop.changes):
             self.notify("No verified match; use k to mark it as kept.")
             return
+        if self.covers_only and not any(c.accepted for c in prop.changes):
+            self.notify("No new cover selected; press o to compare covers.")
+            return
         if await self.write(prop, "verified"):
             self.notify(f"Updated: {prop.title}")
         self.state.save()
@@ -321,6 +367,9 @@ class BookMetaApp(App):
     async def action_keep(self) -> None:
         prop = self.current()
         if not prop or prop.status in ("pending", "flagged", "applied", "kept"):
+            return
+        if self.covers_only:  # don't flag the metadata as reviewed from a cover-only run
+            self.action_skip()
             return
         if await self.write(prop, "kept"):
             self.notify(f"Kept as-is and flagged: {prop.title}")
@@ -349,23 +398,65 @@ class BookMetaApp(App):
         prop = self.current()
         if not prop:
             return
-        files = []
         try:
-            book = read_epub(Path(prop.path))
-            if book.cover_bytes:
-                cur = Path(tempfile.gettempdir()) / "bookmeta-current-cover.jpg"
-                cur.write_bytes(book.cover_bytes)
-                files.append(str(cur))
+            current = read_epub(Path(prop.path)).cover_bytes
         except Exception:
-            pass
-        if prop.cover_file:
-            files.append(prop.cover_file)
-        if not files:
+            current = None
+        options = [o for o in prop.cover_options if not o["current"] or current]
+        if not options:  # scanned before covers were compared: show what we have
+            options = ([{"file": "", "label": "current", "source": "current", "problem": "", "note": "",
+                         "haiku_pick": False, "current": True}] if current else [])
+            if prop.cover_file:
+                options.append({"file": prop.cover_file, "label": "proposed", "source": "", "problem": "", "note": "",
+                                "haiku_pick": False, "current": False})
+        images = []
+        for o in options:
+            try:
+                data = current if o["current"] else Path(o["file"]).read_bytes()
+            except OSError:
+                continue
+            caption = f"{len(images) + 1}. {o['label']}" + ("\ncurrent" if o["current"] else "")
+            caption += ("  * Haiku's pick" if o["haiku_pick"] else "")
+            if o["problem"] not in ("", "ok"):
+                caption += f"\n{o['problem'].replace('_', ' ')}"
+            images.append((data, caption, o))
+        if not images:
             self.notify("No covers to show.")
             return
+        sheet = Path(tempfile.gettempdir()) / f"bookmeta-covers-{abs(hash(prop.path))}.jpg"
+        try:
+            sheet.write_bytes(covers.montage([(d, c) for d, c, _ in images]))
+        except Exception as e:
+            self.notify(f"Couldn't build the comparison: {e}", severity="error")
+            return
         opener = ["open", "-a", "Preview"] if sys.platform == "darwin" else ["xdg-open"]
-        for f in files if opener[0] == "xdg-open" else [None]:
-            subprocess.Popen(opener + ([f] if f else files), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(opener + [str(sheet)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if prop.status not in ("review", "auto", "ok", "nomatch") or len(images) < 2:
+            return
+        shown = [o for _, _, o in images]
+        cover_change = next((c for c in prop.changes if c.field == "cover" and c.accepted), None)
+        chosen = next((i for i, o in enumerate(shown) if cover_change and o["file"] == prop.cover_file),
+                      next((i for i, o in enumerate(shown) if o["current"]), -1))
+        self.push_screen(CoverPicker(shown, chosen), lambda i: self.choose_cover(prop, shown, i))
+
+    def choose_cover(self, prop: Proposal, shown: list[dict], i: int | None) -> None:
+        if i is None:
+            return
+        o = shown[i]
+        prop.changes = [c for c in prop.changes if c.field != "cover"]
+        if o["current"]:
+            prop.cover_file = ""
+            self.notify("Keeping the current cover.")
+        else:
+            current = next((x["label"] for x in shown if x["current"]), "none")
+            prop.cover_file = o["file"]
+            prop.changes.append(Change("cover", current, o["label"], o["source"], False, "chosen by you"))
+            self.notify(f"Cover {i + 1} selected; press a to apply.")
+        if prop.status in ("auto", "ok"):
+            prop.status = "review"
+        self.state.put(prop)
+        self.show_detail()
+        self.refresh_row(prop)
 
     def action_filter(self) -> None:
         self.filter = FILTERS[(FILTERS.index(self.filter) + 1) % len(FILTERS)]
@@ -449,16 +540,19 @@ def main() -> None:
     ap.add_argument("--stats", type=Path, metavar="DB", help="KOReader statistics.sqlite3 to keep in sync with title/author fixes")
     ap.add_argument("--recheck", action="store_true", help="ignore cached results from earlier runs")
     ap.add_argument("--include-verified", action="store_true", help="re-check books already flagged as verified/kept instead of skipping them")
+    ap.add_argument("--covers", action="store_true", help="TUI that re-checks only covers across the whole library (verified books included), to compare and upgrade them")
     ap.add_argument("--force", action="store_true", help="headless (no TUI): ignore all cached results and the verified flag, re-run Jev and Haiku over every book in the library")
     args = ap.parse_args()
     if not args.library.is_dir():
         ap.error(f"{args.library} is not a folder")
     if args.stats and not args.stats.is_file():
         ap.error(f"{args.stats} not found")
+    if args.force and args.covers:
+        ap.error("--covers and --force can't be combined")
     if args.force:
         asyncio.run(run_headless(args.library, args.dry_run, not args.no_auto, args.stats))
         return
-    BookMetaApp(args.library, args.dry_run, not args.no_auto, args.stats, args.recheck, args.include_verified).run()
+    BookMetaApp(args.library, args.dry_run, not args.no_auto, args.stats, args.recheck, args.include_verified, args.covers).run()
 
 
 if __name__ == "__main__":
