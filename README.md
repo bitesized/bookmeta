@@ -30,11 +30,15 @@ result lands in one of these states:
   to review.
 - **Repeats** are cleaned: "Title: A Novel", series tags in titles, "Last, First" authors,
   duplicate authors/subjects.
-- **Haiku once-over** (optional, `ANTHROPIC_API_KEY`): after Jev, Claude Haiku fixes description
-  *formatting only* (paragraph breaks, run-together words, encoding junk; the result is rejected if a
-  single word changed) and checks the final metadata against the source records for misspelled or
-  mangled titles/names, merged authors, translators listed as authors and missing fields. Its fixes
-  are auto-applied only when a source record states that exact value; otherwise they go to review.
+- **Haiku once-over** (optional, `ANTHROPIC_API_KEY`): after Jev, Claude Haiku gives the description a
+  second pass — fixing formatting (paragraph breaks, run-together words, encoding junk) and dropping
+  whole paragraphs Jev's rules missed (praise quotes, movie/TV tie-ins, author bios, "also by" lists,
+  discussion-guide notices, repeated paragraphs) — and checks the final metadata against the source
+  records for misspelled or mangled titles/names, merged authors, translators listed as authors and
+  missing fields. A description edit is verified paragraph-by-paragraph before it's trusted: paragraphs
+  may be dropped or split, but never reworded or invented, and the edit is ignored if it fails that
+  check. Field fixes are auto-applied only when a source record states that exact value; otherwise
+  everything goes to review.
 - **Title and author are only replaced** when the current value is clearly broken (a filename,
   all-caps) or swapped — and swaps always go to review.
 - Every rewrite is verified before it replaces the original, and the original is backed up once to
@@ -49,7 +53,8 @@ current and proposed covers in Preview · `f` cycle filter (all / review / anyth
 
 Options: `--dry-run` (never write), `--no-auto` (review everything), `--recheck` (ignore cached
 results), `--include-verified` (re-check books already flagged as verified/kept instead of skipping
-them), `--stats PATH` (see below).
+them), `--force` (headless: re-scan and re-check the whole library with Jev and Haiku, ignoring all
+cached state, printing plain progress instead of opening the TUI), `--stats PATH` (see below).
 
 ## Configuration (`.env` in the project folder, or `~/.config/bookmeta/.env`)
 

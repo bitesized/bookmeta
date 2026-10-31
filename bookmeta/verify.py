@@ -13,7 +13,7 @@ import httpx
 from . import covers
 from .describe import KINDS, DescriptionCleaner
 from .epub import Epub, find_isbns, read_epub
-from .haiku import Haiku, HaikuError, in_records, same_words
+from .haiku import Haiku, HaikuError, in_records, trim_slop
 from .jev import Jev, JevError
 from .normalize import (
     author_similarity,
@@ -160,14 +160,21 @@ async def _haiku_pass(haiku: Haiku, book: Epub, matched: list[Candidate], change
     )
 
     formatted = (result.get("description") or "").strip()
-    if desc and formatted and formatted != desc:
-        if not same_words(desc, formatted):
-            prop.notes.append("Haiku reworded the description; formatting ignored")
-        elif desc_change:
-            desc_change.proposed = formatted
-            desc_change.reason += " + formatting fixed"
+    if desc and formatted != desc:
+        if not formatted:
+            prop.notes.append("Haiku flagged the whole description as slop; kept it for review rather than drop it blind")
         else:
-            changes.append(Change("description", m.description, formatted, "haiku", trusted, "formatting fixed (same words)"))
+            trimmed = trim_slop(desc, formatted)
+            if trimmed is None:
+                prop.notes.append("Haiku's description edit changed wording, not just formatting/slop; ignored")
+            else:
+                clean, dropped = trimmed
+                reason = f"removed {dropped} slop paragraph(s)" if dropped > 0 else "formatting fixed"
+                if desc_change:
+                    desc_change.proposed = clean
+                    desc_change.reason += f" + {reason}"
+                else:
+                    changes.append(Change("description", m.description, clean, "haiku", trusted, reason))
 
     for issue in result.get("issues", []):
         fld, suggested = issue["field"], issue["suggested"].strip()

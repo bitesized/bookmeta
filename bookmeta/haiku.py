@@ -15,10 +15,16 @@ FIELDS = ["title", "authors", "series", "series_index", "publisher", "pubdate", 
 
 SYSTEM = """You check ebook metadata before it is written into an EPUB for an e-reader.
 
-1. DESCRIPTION: return the description with formatting fixed only: paragraph breaks (blank line between
-paragraphs) where the text obviously runs paragraphs together, missing spaces ("DepressionA Penguin Classic"),
-stray whitespace, broken encoding (â€™ -> ’), leftover HTML entities. Never reword, summarise, reorder, add or
-remove sentences. If nothing needs fixing return it unchanged. Return "" if the input is empty.
+1. DESCRIPTION: this has already been through one filter; clean up what it missed. You may:
+   - fix formatting: paragraph breaks where text runs together, missing spaces ("DepressionA Penguin
+     Classic"), stray whitespace, broken encoding (â€™ -> ’), leftover HTML entities.
+   - DROP whole paragraphs that are slop, not synopsis: quoted praise/review excerpts ("'Gripping' —The
+     Times"), bestseller/award banners, "Praise for...", "now a major motion picture"/streaming tie-ins,
+     "about the author" bios, "also by this author" lists, discussion-guide or edition notices, a pasted
+     excerpt/first chapter, and paragraphs that just repeat another paragraph.
+   Never reword, summarise, reorder, or add a sentence, and never touch the wording of a paragraph you keep
+   - only remove whole paragraphs or fix formatting within one. If nothing needs fixing return the
+   description unchanged. Return "" if the input is empty or everything in it is slop.
 
 2. ISSUES: compare the PROPOSED metadata with the catalogue records, the filename and the book's title page.
 Report only clear problems:
@@ -103,10 +109,44 @@ def _letters(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", strip_accents(s).lower())
 
 
-def same_words(before: str, after: str) -> bool:
-    """Formatting may change spacing, breaks and encoding, never the words."""
-    a, b = _letters(before), _letters(after)
-    return bool(b) and fuzz.ratio(a, b) >= 98 and abs(len(a) - len(b)) <= max(10, len(a) // 100)
+def _match_chunk(remainder: str, target: str) -> tuple[bool, str] | None:
+    """Can `target` (one output paragraph's letters) continue matching `remainder` (unmatched tail of the
+    current input paragraph)? Returns (fully consumed?, new remainder), or None if it doesn't match at all."""
+    if fuzz.ratio(target, remainder) >= 95:
+        return True, ""
+    if 0 < len(target) < len(remainder) and fuzz.ratio(target, remainder[: len(target)]) >= 97:
+        return False, remainder[len(target):]
+    return None
+
+
+def trim_slop(original: str, result: str) -> tuple[str, int] | None:
+    """Verify `result` only dropped whole paragraphs and/or fixed formatting - never reworded or invented
+    text. Paragraphs may be split (a run-together one became two) but must stay in order and keep their
+    wording. Returns (verified text, paragraphs dropped), or None if the result can't be trusted."""
+    paras_in = [p.strip() for p in re.split(r"\n\s*\n", original) if p.strip()]
+    paras_out = [p.strip() for p in re.split(r"\n\s*\n", result) if p.strip()]
+    if not paras_out and paras_in:
+        return None  # dropping everything looks like a failure, not genuine all-slop; keep the original
+    i, remainder = 0, None
+    for p in paras_out:
+        target, matched = _letters(p), False
+        while i < len(paras_in):
+            cand = remainder if remainder is not None else _letters(paras_in[i])
+            outcome = _match_chunk(cand, target)
+            if outcome is None:
+                if remainder is not None:
+                    return None  # mid-split paragraph that doesn't continue as expected -> invented text
+                i += 1  # skip this input paragraph (dropped as slop) and try the next
+                continue
+            whole, remainder = outcome
+            if whole:
+                i += 1
+                remainder = None
+            matched = True
+            break
+        if not matched:
+            return None  # ran out of input paragraphs without a match -> invented text
+    return "\n\n".join(paras_out), len(paras_in) - len(paras_out)
 
 
 def _key(s: str) -> str:
