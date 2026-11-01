@@ -6,13 +6,17 @@ import asyncio
 import json
 import os
 import re
+import sqlite3
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
+from rapidfuzz import fuzz
 
 from .describe import clean_html
 from .epub import isbn_valid, to_isbn13
+from .normalize import strip_accents
 
 CONTACT = os.environ.get("BOOKMETA_CONTACT", "")
 USER_AGENT = f"bookmeta/0.1 (personal KOReader library tool{'; ' + CONTACT if CONTACT else ''})"
@@ -22,6 +26,11 @@ HARDCOVER_TOKEN = next((os.environ[k] for k in ("HARDCOVER_TOKEN", "HARDCOVER_AP
 APPLE_COUNTRIES = [c.strip().lower() for c in os.environ.get(
     "BOOKMETA_APPLE_COUNTRIES", os.environ.get("BOOKMETA_APPLE_COUNTRY", "us,gb")).split(",") if c.strip()] or ["us"]
 APPLE_COUNTRY = APPLE_COUNTRIES[0]
+APPLE_LOOKUP = "https://itunes.apple.com/lookup"
+APPLE_BATCH = 20  # ISBNs per Apple lookup call
+# Same folder as store.DATA_DIR (store imports this module, so it can't be imported here).
+CACHE_FILE = Path(os.environ.get("BOOKMETA_HOME", Path.home() / ".local" / "share" / "bookmeta")) / "api-cache.sqlite3"
+CACHE_DAYS = float(os.environ.get("BOOKMETA_API_CACHE_DAYS", "30"))
 
 
 @dataclass
@@ -75,11 +84,59 @@ LIMITS = {
 DISABLED: dict[str, str] = {}
 
 
-async def _get_json(client: httpx.AsyncClient, limiter: str, url: str, **kw) -> dict | None:
+class ResponseCache:
+    """Catalogue answers kept on disk, so a re-scan doesn't wait on rate limits for questions already asked. Shared
+    by every library; an answer older than CACHE_DAYS is asked again, and 0 turns the cache off."""
+
+    def __init__(self, path: Path, days: float):
+        self.path, self.max_age = path, days * 86400
+        self.conn: sqlite3.Connection | None = None
+
+    def _db(self) -> sqlite3.Connection:
+        if self.conn is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(self.path, timeout=5)
+            self.conn.execute("CREATE TABLE IF NOT EXISTS responses (key TEXT PRIMARY KEY, at REAL, body TEXT)")
+        return self.conn
+
+    def get(self, key: str):
+        if self.max_age <= 0:
+            return None
+        try:
+            row = self._db().execute("SELECT at, body FROM responses WHERE key = ?", (key,)).fetchone()
+        except sqlite3.Error:
+            return None
+        return json.loads(row[1]) if row and time.time() - row[0] < self.max_age else None
+
+    def put(self, key: str, data) -> None:
+        if self.max_age <= 0:
+            return
+        try:
+            with self._db() as conn:
+                conn.execute("INSERT OR REPLACE INTO responses VALUES (?, ?, ?)", (key, time.time(), json.dumps(data)))
+        except sqlite3.Error:
+            pass  # a cache that can't be written just means asking again next time
+
+
+CACHE = ResponseCache(CACHE_FILE, CACHE_DAYS)
+
+
+def cache_key(url: str, params: dict) -> str:
+    """The request without its API key, which shouldn't sit in the cache and doesn't change the answer."""
+    return json.dumps([url, sorted((k, str(v)) for k, v in params.items() if k != "key")], ensure_ascii=False)
+
+
+async def _get_json(client: httpx.AsyncClient, limiter: str, url: str, waited: bool = False, cache: bool = True,
+                    **kw) -> dict | None:
+    """GET a JSON answer, from the cache if it has one. `waited`: the caller already took this call's rate-limit slot."""
+    key = cache_key(url, kw.get("params") or {})
+    if cache and (hit := CACHE.get(key)) is not None:
+        return hit
     for attempt in range(3):
         if limiter in DISABLED:
             return None
-        await LIMITS[limiter].wait()
+        if attempt or not waited:
+            await LIMITS[limiter].wait()
         try:
             r = await client.get(url, timeout=20, **kw)
         except httpx.HTTPError:
@@ -93,9 +150,12 @@ async def _get_json(client: httpx.AsyncClient, limiter: str, url: str, **kw) -> 
         if r.status_code != 200:
             return None
         try:
-            return r.json()
+            data = r.json()
         except ValueError:
             return None
+        if cache:
+            CACHE.put(key, data)
+        return data
     return None
 
 
@@ -192,17 +252,83 @@ async def google(client, title: str, author: str, isbn: str | None) -> list[Cand
 # --------------------------------------------------------------------------- Apple Books
 
 
+def _resemblance(r: dict, title: str, author: str) -> float:
+    norm = lambda s: strip_accents(s).lower()
+    return (0.7 * fuzz.token_set_ratio(norm(title), norm(r.get("trackName", "")))
+            + 0.3 * fuzz.token_set_ratio(norm(author), norm(r.get("artistName", ""))))
+
+
+class AppleISBNBatcher:
+    """Apple's rate limit is the slowest part of a scan, but its lookup takes many ISBNs at once, so the ISBN
+    lookups of every book being scanned queue up together and go out as one call when Apple's turn comes. The
+    answer doesn't say which ISBN each result was for, so each result goes to the queued book whose title and
+    author it resembles most. Every result belongs to one of the ISBNs asked for, so only the relative match
+    matters, and a misspelled title still finds its book."""
+
+    def __init__(self):
+        self.pending: dict[str, list[tuple[str, str, str, asyncio.Future]]] = {}
+        self.tasks: dict[str, asyncio.Task] = {}
+
+    async def lookup(self, client, isbn: str, title: str, author: str, country: str) -> list[dict]:
+        hit = CACHE.get(cache_key(APPLE_LOOKUP, {"isbn": isbn, "country": country}))
+        if hit is not None:
+            return hit.get("results", [])
+        fut = asyncio.get_running_loop().create_future()
+        self.pending.setdefault(country, []).append((isbn, title, author, fut))
+        if country not in self.tasks:
+            self.tasks[country] = asyncio.create_task(self._flush(client, country))
+        return await fut
+
+    async def _flush(self, client, country: str) -> None:
+        queue = self.pending[country]
+        try:
+            while queue:
+                await LIMITS["apple"].wait()  # the queue keeps filling while this waits its turn
+                batch = queue[:APPLE_BATCH]
+                del queue[:len(batch)]
+                found: dict[str, list[dict]] = {}
+                try:
+                    found = await self._ask(client, country, batch)
+                finally:
+                    for isbn, _, _, fut in batch:
+                        if not fut.done():
+                            fut.set_result(found.get(isbn, []))
+        finally:
+            del self.tasks[country]
+
+    async def _ask(self, client, country: str, batch: list) -> dict[str, list[dict]]:
+        isbns = list(dict.fromkeys(i for i, *_ in batch))
+        data = await _get_json(client, "apple", APPLE_LOOKUP, waited=True, cache=False,
+                               params={"isbn": ",".join(isbns), "country": country})
+        if data is None:
+            return {}
+        found: dict[str, list[dict]] = {i: [] for i in isbns}
+        for r in data.get("results", []):
+            if len(isbns) == 1:
+                found[isbns[0]].append(r)
+            else:
+                best = max(batch, key=lambda b: _resemblance(r, b[1], b[2]))
+                found[best[0]].append(r)
+        for isbn, results in found.items():  # cached as if each ISBN had been looked up alone
+            CACHE.put(cache_key(APPLE_LOOKUP, {"isbn": isbn, "country": country}), {"results": results})
+        return found
+
+
+APPLE_ISBNS = AppleISBNBatcher()
+
+
 async def apple(client, title: str, author: str, isbn: str | None, country: str = APPLE_COUNTRY) -> list[Candidate]:
     if isbn:
-        data = await _get_json(client, "apple", "https://itunes.apple.com/lookup", params={"isbn": isbn, "country": country})
+        results = await APPLE_ISBNS.lookup(client, isbn, title, author, country)
     else:
         term = f"{title} {author}".strip()
         data = await _get_json(
             client, "apple", "https://itunes.apple.com/search",
             params={"term": term, "media": "ebook", "entity": "ebook", "limit": 5, "country": country},
         )
+        results = (data or {}).get("results", [])
     out = []
-    for r in (data or {}).get("results", [])[:5]:
+    for r in results[:5]:
         if r.get("kind") not in (None, "ebook"):
             continue
         c = Candidate(
@@ -231,19 +357,24 @@ async def hardcover(client, title: str, author: str, isbn: str | None) -> list[C
     if not HARDCOVER_TOKEN:
         return []
     token = HARDCOVER_TOKEN if HARDCOVER_TOKEN.lower().startswith("bearer ") else f"Bearer {HARDCOVER_TOKEN}"
-    await LIMITS["hardcover"].wait()
-    try:
-        r = await client.post(
-            "https://api.hardcover.app/v1/graphql",
-            json={"query": HC_QUERY, "variables": {"q": isbn or f"{title} {author}".strip()}},
-            headers={"authorization": token},
-            timeout=30,
-        )
-        results = r.json()["data"]["search"]["results"]
-    except Exception:
-        return []
-    if isinstance(results, str):
-        results = json.loads(results)
+    q = isbn or f"{title} {author}".strip()
+    key = cache_key("https://api.hardcover.app/v1/graphql", {"q": q})
+    results = CACHE.get(key)
+    if results is None:
+        await LIMITS["hardcover"].wait()
+        try:
+            r = await client.post(
+                "https://api.hardcover.app/v1/graphql",
+                json={"query": HC_QUERY, "variables": {"q": q}},
+                headers={"authorization": token},
+                timeout=30,
+            )
+            results = r.json()["data"]["search"]["results"]
+        except Exception:
+            return []
+        if isinstance(results, str):
+            results = json.loads(results)
+        CACHE.put(key, results)
     out = []
     for hit in (results or {}).get("hits", [])[:5]:
         d = hit.get("document", {})

@@ -85,7 +85,9 @@ library.
 The library folder is scanned recursively. Each EPUB is looked up, by ISBN first and then by title and
 author, in Apple Books, Open Library, Google Books and Hardcover. Jev checks that the match really is the
 same book and cleans the description. Then, if `ANTHROPIC_API_KEY` is set, Claude Haiku gives everything
-a once-over and compares the covers. Each book ends up in one of these states:
+a once-over and compares the covers. Four books are checked at once. Apple allows only about 20 requests a
+minute, so ISBN lookups from books in flight are sent to Apple together, and every catalogue answer is
+cached on disk for 30 days, so a re-scan barely waits on Apple at all. Each book ends up in one of these states:
 
 | Status | Meaning |
 |---|---|
@@ -196,6 +198,7 @@ All of these can also be switched from the command palette while the TUI is runn
 | `HARDCOVER_API_KEY` (or `HARDCOVER_TOKEN`) | Recommended for **series** data (free, hardcover.app → Settings → API; expires yearly). |
 | `BOOKMETA_CONTACT` | An email for Open Library's User-Agent; raises their rate limit from 1 to 3 req/s. |
 | `BOOKMETA_APPLE_COUNTRIES` | Apple Books storefronts, comma-separated (default `us,gb`). The first is used for metadata; all are searched for covers. |
+| `BOOKMETA_API_CACHE_DAYS` | How long catalogue answers (Apple, Google, Hardcover, Open Library) are reused before asking again (default `30`; `0` turns the cache off). `--force` re-checks books but still uses this cache. |
 | `BOOKMETA_HOME` | Where state, backups and the log are kept (default `~/.local/share/bookmeta`). |
 | `BOOKMETA_CONFIG` | The settings file (default `~/.config/bookmeta/settings.json`). |
 
@@ -249,6 +252,7 @@ Per library, in `~/.local/share/bookmeta/<library>-<hash>/` (*Open the data fold
 - `backups/`: each book's original, copied once before the first rewrite, and removed
   `custom_metadata/` files
 - `changes.jsonl`: every write and removal, with before/after values
+- `api-cache.sqlite3`: catalogue answers, so re-scans don't wait on rate limits again
 - `covers/`: cached cover candidates
 - `state.json`, `state-covers.json`: cached results, reused while a file's size and date are unchanged
 
