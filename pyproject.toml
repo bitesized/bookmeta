@@ -12,6 +12,7 @@ dependencies = [
     "pillow>=10.4",
     "rapidfuzz>=3.9",
     "anthropic>=2.3.0",
+    "numpy>=2.0",
 ]
 
 [project.scripts]

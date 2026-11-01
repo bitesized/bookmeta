@@ -109,15 +109,20 @@ a once-over and compares the covers. Each book ends up in one of these states:
 ### What it changes, and what it never does
 
 - **Missing fields** are filled: description, series, ISBN, publisher, date, language, subjects.
-- **Covers** are replaced automatically only by a *larger copy of the same artwork* (perceptual hash
-  match), or when the current cover is missing or tiny and two sources agree. A different edition's
-  artwork always goes to review. Covers are stored at most 2000px tall.
-- **Cover comparison** (with `ANTHROPIC_API_KEY`): Haiku looks at the current cover and every distinct
-  candidate side by side and flags movie/TV tie-ins, adverts (bestseller banners, badges, review quotes),
-  blank/Gutenberg/placeholder covers, wrong books and poor scans. Flagged candidates are never chosen, and
-  Haiku picks the nicest-looking remaining cover even if it is from another edition. Its pick goes to
-  review unless it is a larger copy of the current art, and it never proposes a smaller cover than the
-  current one.
+- **Covers** are gathered from Apple Books (US and UK storefronts, searched by title as well as ISBN so other
+  editions show up), Google Books and Hardcover at full size; Open Library is used only when nothing else
+  has art. Searches use the catalogue's spelling of the title, so a misspelled file title still finds
+  covers. Each candidate is checked for real sharpness: one blown up from a much smaller image counts as
+  half its height and is marked "soft". Covers are stored at most 2000px tall.
+- **Covers are replaced automatically** only by a *noticeably sharper copy of the same artwork*, or when the
+  current cover is missing or tiny and the new one is clean store art backed by an ISBN match or a second
+  source. A different edition's artwork always goes to review.
+- **Cover scoring** (with `ANTHROPIC_API_KEY`): Haiku looks at the current cover and every distinct candidate
+  side by side, flags movie/TV tie-ins, streaming adverts, foreign editions, placeholders, wrong books, scans
+  and poor images, and scores each one's artwork from 1 to 10. bookmeta adds points for real resolution
+  and source, takes points off for flags (a wrong book or placeholder is never chosen), and gives the
+  current cover a small bonus so it only changes for something clearly better. Without a key, a current cover of
+  600px or more is kept.
 - **Descriptions** are split into paragraphs. Praise quotes, bestseller/award banners, film/TV tie-ins,
   "about the author", pasted first chapters and repeated paragraphs are removed: rules first, then Jev
   classifies the rest. If a dropped paragraph might have been synopsis, the book goes to review.
@@ -176,7 +181,7 @@ All of these can also be switched from the command palette while the TUI is runn
 | `GOOGLE_BOOKS_API_KEY` | Recommended (free, Google Cloud console). The keyless quota is shared and usually exhausted. |
 | `HARDCOVER_API_KEY` (or `HARDCOVER_TOKEN`) | Recommended for **series** data (free, hardcover.app → Settings → API; expires yearly). |
 | `BOOKMETA_CONTACT` | An email for Open Library's User-Agent; raises their rate limit from 1 to 3 req/s. |
-| `BOOKMETA_APPLE_COUNTRY` | Apple Books storefront (default `us`; e.g. `gb`). |
+| `BOOKMETA_APPLE_COUNTRIES` | Apple Books storefronts, comma-separated (default `us,gb`). The first is used for metadata; all are searched for covers. |
 | `BOOKMETA_HOME` | Where state, backups and the log are kept (default `~/.local/share/bookmeta`). |
 | `BOOKMETA_CONFIG` | The settings file (default `~/.config/bookmeta/settings.json`). |
 

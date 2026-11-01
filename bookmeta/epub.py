@@ -431,9 +431,13 @@ def _apply_meta(root, version: str, changes: dict) -> None:
 
 
 def encode_cover(data: bytes, media_type: str) -> bytes:
-    """Re-encode a downloaded cover to the media type the EPUB declares, capped in size."""
+    """Re-encode a downloaded cover to the media type the EPUB declares, capped in size. A JPEG that already
+    fits goes in untouched, since every re-encode loses a little."""
     with Image.open(io.BytesIO(data)) as im:
         im.load()
+        if im.format == "JPEG" and media_type in ("image/jpeg", "image/jpg") and max(im.size) <= COVER_MAX_EDGE \
+                and im.mode in ("RGB", "L"):
+            return data
         if max(im.size) > COVER_MAX_EDGE:
             im.thumbnail((COVER_MAX_EDGE, COVER_MAX_EDGE), Image.LANCZOS)
         out = io.BytesIO()

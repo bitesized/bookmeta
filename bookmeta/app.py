@@ -79,10 +79,11 @@ class CoverPicker(ModalScreen[int | None]):
     def compose(self) -> ComposeResult:
         lines = ["[b]Choose a cover[/b] [dim](numbers match the comparison sheet in Preview)[/dim]", ""]
         for i, o in enumerate(self.options):
-            tags = [t for t in ("current" if o["current"] else "", "Haiku's pick" if o["haiku_pick"] else "",
+            tags = [t for t in ("current" if o["current"] else "", "best score" if o["haiku_pick"] else "",
                                 "selected" if i == self.chosen else "") if t]
             problem = f" [red]{o['problem'].replace('_', ' ')}[/red]" if o["problem"] not in ("", "ok") else ""
-            lines.append(f"[b]{i + 1}[/b]  {escape(o['label'])}{problem}"
+            score = f" [dim]score {o['score']:.1f}[/dim]" if o.get("score") is not None else ""
+            lines.append(f"[b]{i + 1}[/b]  {escape(o['label'])}{problem}{score}"
                          + (f"  [cyan]{', '.join(tags)}[/cyan]" if tags else ""))
             if o["note"]:
                 lines.append(f"   [dim]{escape(o['note'])}[/dim]")
@@ -564,7 +565,7 @@ class BookMetaApp(App):
             except OSError:
                 continue
             caption = f"{len(images) + 1}. {o['label']}" + ("\ncurrent" if o["current"] else "")
-            caption += ("  * Haiku's pick" if o["haiku_pick"] else "")
+            caption += ("  * best score" if o["haiku_pick"] else "")
             if o["problem"] not in ("", "ok"):
                 caption += f"\n{o['problem'].replace('_', ' ')}"
             images.append((data, caption, o))

@@ -18,7 +18,10 @@ CONTACT = os.environ.get("BOOKMETA_CONTACT", "")
 USER_AGENT = f"bookmeta/0.1 (personal KOReader library tool{'; ' + CONTACT if CONTACT else ''})"
 GOOGLE_KEY = os.environ.get("GOOGLE_BOOKS_API_KEY", "")
 HARDCOVER_TOKEN = next((os.environ[k] for k in ("HARDCOVER_TOKEN", "HARDCOVER_API_TOKEN", "HARDCOVER_API_KEY") if os.environ.get(k)), "").strip()
-APPLE_COUNTRY = os.environ.get("BOOKMETA_APPLE_COUNTRY", "us")
+# Apple storefronts: the first is used for metadata; all are searched for cover art (UK editions often differ).
+APPLE_COUNTRIES = [c.strip().lower() for c in os.environ.get(
+    "BOOKMETA_APPLE_COUNTRIES", os.environ.get("BOOKMETA_APPLE_COUNTRY", "us,gb")).split(",") if c.strip()] or ["us"]
+APPLE_COUNTRY = APPLE_COUNTRIES[0]
 
 
 @dataclass
@@ -117,8 +120,11 @@ async def openlibrary(client, title: str, author: str, isbn: str | None) -> list
     if isbn:
         params["isbn"] = isbn
     else:
-        params.update(title=title, author=author)
+        params.update(title=title, author=author, language="eng")
     data = await _get_json(client, "openlibrary", "https://openlibrary.org/search.json", params=params)
+    if not isbn and not (data or {}).get("docs"):
+        params.pop("language")  # nothing in English; widen rather than find nothing
+        data = await _get_json(client, "openlibrary", "https://openlibrary.org/search.json", params=params)
     out = []
     for d in (data or {}).get("docs", [])[:5]:
         c = Candidate(
@@ -131,7 +137,8 @@ async def openlibrary(client, title: str, author: str, isbn: str | None) -> list
             by_isbn=bool(isbn),
         )
         if d.get("cover_i"):
-            c.cover_urls.append(f"https://covers.openlibrary.org/b/id/{d['cover_i']}-L.jpg")
+            # No size suffix: the original upload; -L is capped at 500px tall.
+            c.cover_urls.append(f"https://covers.openlibrary.org/b/id/{d['cover_i']}.jpg")
         out.append(c)
     return out
 
@@ -143,14 +150,23 @@ async def google(client, title: str, author: str, isbn: str | None) -> list[Cand
     # Google returns nothing for quoted phrases, so fielded terms are unquoted, with a plain search as fallback.
     last = author.split()[-1] if author.split() else ""
     queries = [f"isbn:{isbn}"] if isbn else [f"intitle:{title}" + (f" inauthor:{last}" if last else ""), f"{title} {author}".strip()]
-    data = None
-    for q in queries:
-        params = {"q": q, "maxResults": 5, "printType": "books"}
-        if GOOGLE_KEY:
-            params["key"] = GOOGLE_KEY
-        data = await _get_json(client, "google", "https://www.googleapis.com/books/v1/volumes", params=params)
-        if data and data.get("items"):
-            break
+
+    async def search(restrict_lang: bool) -> dict | None:
+        data = None
+        for q in queries:
+            params = {"q": q, "maxResults": 5, "printType": "books"}
+            if restrict_lang:
+                params["langRestrict"] = "en"
+            if GOOGLE_KEY:
+                params["key"] = GOOGLE_KEY
+            data = await _get_json(client, "google", "https://www.googleapis.com/books/v1/volumes", params=params)
+            if data and data.get("items"):
+                break
+        return data
+
+    data = await search(restrict_lang=not isbn)
+    if not isbn and not (data or {}).get("items"):
+        data = await search(restrict_lang=False)  # nothing in English; widen rather than find nothing
     out = []
     for item in (data or {}).get("items", [])[:5]:
         v = item.get("volumeInfo", {})
@@ -176,14 +192,14 @@ async def google(client, title: str, author: str, isbn: str | None) -> list[Cand
 # --------------------------------------------------------------------------- Apple Books
 
 
-async def apple(client, title: str, author: str, isbn: str | None) -> list[Candidate]:
+async def apple(client, title: str, author: str, isbn: str | None, country: str = APPLE_COUNTRY) -> list[Candidate]:
     if isbn:
-        data = await _get_json(client, "apple", "https://itunes.apple.com/lookup", params={"isbn": isbn, "country": APPLE_COUNTRY})
+        data = await _get_json(client, "apple", "https://itunes.apple.com/lookup", params={"isbn": isbn, "country": country})
     else:
         term = f"{title} {author}".strip()
         data = await _get_json(
             client, "apple", "https://itunes.apple.com/search",
-            params={"term": term, "media": "ebook", "entity": "ebook", "limit": 5, "country": APPLE_COUNTRY},
+            params={"term": term, "media": "ebook", "entity": "ebook", "limit": 5, "country": country},
         )
     out = []
     for r in (data or {}).get("results", [])[:5]:
@@ -285,6 +301,16 @@ async def gather(client, title: str, author: str, isbns: list[str]) -> list[Cand
         return await fn(client, title, author, None) if title else []
 
     results = await asyncio.gather(*(one(n) for n in enabled_sources()), return_exceptions=True)
+    return [c for r in results if isinstance(r, list) for c in r]
+
+
+async def more_covers(client, title: str, author: str, searched_title: bool) -> list[Candidate]:
+    """Extra Apple results for cover art only: a title search in every storefront, since an ISBN lookup finds
+    just the one edition. Skips the main storefront's title search when gather() already ran it."""
+    if not title:
+        return []
+    countries = APPLE_COUNTRIES[1:] if searched_title else APPLE_COUNTRIES
+    results = await asyncio.gather(*(apple(client, title, author, None, c) for c in countries), return_exceptions=True)
     return [c for r in results if isinstance(r, list) for c in r]
 
 

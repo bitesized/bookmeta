@@ -61,19 +61,33 @@ SCHEMA = {
 }
 
 
-COVER_SYSTEM = """You choose the best cover for an ebook on an e-reader. Image 0 is the book's current cover (if
-given); the rest are candidates from book stores. For every image say what is wrong with it, if anything:
-- "movie": a film/TV tie-in cover (stills, actors, "now a major motion picture")
-- "advert": banners, stickers, award or price badges, "as seen on", review quotes plastered on the art
-- "generic": blank, plain text on a flat colour, Project Gutenberg / publisher placeholder, library stamp
-- "wrong_book": clearly a different book, title or author
-- "poor": blurry, cropped, a photo of a physical book, or a scan with borders
+COVER_SYSTEM = """You judge covers for an ebook shown full screen on an e-reader. Image 0 is the book's current
+cover (if given); the rest are candidates from book stores and catalogues, each labelled with its source and real
+size. For every image say what is wrong with it, if anything:
+- "movie": a film/TV tie-in cover showing actual stills, actors, or movie-poster artwork in place of the book's
+  own art. A cover that keeps its normal artwork and just mentions a film/TV adaptation in small text is NOT
+  this - see below.
+- "advert": a "now streaming on Netflix/Prime/etc" or "now a TV series" banner or sticker overlaid on the
+  cover. Do NOT flag: award badges or medallions (Booker, Pulitzer, Nobel, National Book Award, ...), review
+  quotes or blurbs, "now a major motion picture" text, bestseller lists ("#1 NYT bestseller"), or any other
+  small printed note - these are normal and not objectionable.
+- "foreign": the cover is for a non-English edition or translation (title and/or cover text are in another
+  language). Only flag this when the cover itself is clearly a non-English edition, not when it merely has
+  some incidental foreign-language text on an otherwise English cover. If the title is printed in English,
+  it is not "foreign".
+- "generic": a placeholder rather than a designed cover: blank, the title in a default font on a flat colour,
+  a Project Gutenberg / e-book converter / library cover. Deliberate typographic designs from a publisher
+  (Penguin Classics, Vintage, NYRB, Faber, Picador, ...) are designed covers, NOT generic.
+- "wrong_book": clearly a different book, title or author (a companion volume, study guide or summary counts)
+- "scan": a scan or photo of a physical copy rather than the publisher's digital artwork: visible spine,
+  page edges, glare, shadows, skew, curled or worn corners, price stickers, library labels, a background or
+  border around the cover, uneven colour or paper texture
+- "poor": visibly blurry, pixelated, JPEG-smeared or badly cropped even at the size shown
 - "ok": none of these
-Then pick the best image: never one with a problem other than "ok" if any image is "ok". Among the "ok" ones
-prefer the most attractive, well-designed cover, even if it is from a different edition; prefer the current
-cover when it is about as good as the alternatives. Judge the design first: each image is labelled with its
-real size, but size only breaks ties between covers that look about equally good.
-Keep notes and "why" to one short sentence."""
+Then give every image a "score" from 1 to 10 for how good it is as this book's cover: design, legibility of
+title and author, and how well it suits the book. Score the artwork only; real resolution is weighed separately,
+so don't mark a cover down for being small, and don't mark it down for a problem you already flagged.
+Similar-looking covers should get similar scores. Keep notes and "why" to one short sentence."""
 
 COVER_SCHEMA = {
     "type": "object",
@@ -84,17 +98,20 @@ COVER_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "image": {"type": "integer"},
-                    "problem": {"type": "string", "enum": ["ok", "movie", "advert", "generic", "wrong_book", "poor"]},
+                    "problem": {
+                        "type": "string",
+                        "enum": ["ok", "movie", "advert", "foreign", "generic", "wrong_book", "scan", "poor"],
+                    },
+                    "score": {"type": "integer"},
                     "note": {"type": "string"},
                 },
-                "required": ["image", "problem", "note"],
+                "required": ["image", "problem", "score", "note"],
                 "additionalProperties": False,
             },
         },
-        "best": {"type": "integer"},
         "why": {"type": "string"},
     },
-    "required": ["verdicts", "best", "why"],
+    "required": ["verdicts", "why"],
     "additionalProperties": False,
 }
 
@@ -136,22 +153,23 @@ class Haiku:
         except ValueError as e:
             raise HaikuError("unparseable response") from e
 
-    async def pick_cover(self, images: list[tuple[bytes, str]], has_current: bool, title: str, authors: str) -> dict:
-        """`images` are (JPEG thumbnail, real size) pairs; index 0 is the current cover when `has_current`. Returns
-        {"verdicts": {index: (problem, note)}, "best": index, "why": str} with indices validated."""
+    async def judge_covers(self, images: list[tuple[bytes, str]], has_current: bool, title: str, authors: str) -> dict:
+        """`images` are (JPEG thumbnail, caption) pairs; index 0 is the current cover when `has_current`. Returns
+        {"verdicts": {index: (problem, note, score)}, "why": str} with indices validated and scores clamped."""
         content: list = []
-        for i, (data, size) in enumerate(images):
+        for i, (data, caption) in enumerate(images):
             label = "current cover" if i == 0 and has_current else "candidate"
-            content.append({"type": "text", "text": f"Image {i} ({label}, {size}px):"})
+            content.append({"type": "text", "text": f"Image {i} ({label}, {caption}):"})
             content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                                          "data": base64.b64encode(data).decode()}})
         content.append({"type": "text", "text": f"Book: {title} by {authors}"
                         + ("" if has_current else "\nThere is no current cover; image 0 is a candidate.")})
         out = await self._ask(COVER_SYSTEM, COVER_SCHEMA, content, effort="medium")
-        if not 0 <= out.get("best", -1) < len(images):
-            raise HaikuError("cover pick out of range")
-        verdicts = {v["image"]: (v["problem"], v["note"]) for v in out["verdicts"] if 0 <= v["image"] < len(images)}
-        return {"verdicts": verdicts, "best": out["best"], "why": out["why"]}
+        verdicts = {v["image"]: (v["problem"], v["note"], max(1, min(10, int(v["score"]))))
+                    for v in out["verdicts"] if 0 <= v["image"] < len(images)}
+        if not verdicts:
+            raise HaikuError("no cover verdicts")
+        return {"verdicts": verdicts, "why": out["why"]}
 
     async def review(self, proposed: dict, description: str, records: list[str], filename: str, front: str) -> dict:
         prompt = (
