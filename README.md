@@ -151,6 +151,16 @@ a once-over and compares the covers. Each book ends up in one of these states:
 upgrade the covers of a library that's already been through bookmeta. Other metadata and the verified flag
 are left alone, and its results are cached separately from a full check.
 
+To judge cover choices without touching any book, replay a sample of already-scanned books from their
+backups:
+
+```
+uv run python -m bookmeta.coverbench --limit 25 --out coverbench-out
+```
+
+It writes a sheet per book (every option with its size, flag and score, the new pick, and the earlier pick)
+and an `index.html` to page through them. `--match` picks books by path, `--seed` a different sample.
+
 ### KOReader custom metadata
 
 When you edit a book's details in KOReader (*Book information → Set custom …*), KOReader saves them in
