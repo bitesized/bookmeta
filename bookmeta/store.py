@@ -152,6 +152,50 @@ def find_stats_db(library: Path) -> Path | None:
     return None
 
 
+def find_bookinfo_db(library: Path) -> Path | None:
+    """KOReader's cover browser cache (thumbnails plus title/authors/series/description) for a library on the device."""
+    for d in (library, *library.parents):
+        for f in (d / "settings" / "bookinfo_cache.sqlite3", d / ".adds" / "koreader" / "settings" / "bookinfo_cache.sqlite3"):
+            if f.is_file():
+                return f
+    return None
+
+
+def _bookinfo_rows(conn: sqlite3.Connection, db: Path, book: Path) -> list[tuple]:
+    """Cache rows for `book`. KOReader stores device paths (/mnt/onboard/...), so match on the filename and the
+    path below the device root rather than the mount point."""
+    device_root = db.parents[3] if db.parent.parent.parent.name == ".adds" else db.parents[2]
+    try:
+        tail = "/" + book.resolve().relative_to(device_root.resolve()).as_posix()
+    except ValueError:
+        tail = "/" + book.name
+    rows = conn.execute("SELECT bcid, directory, filename, filesize, filemtime FROM bookinfo WHERE filename = ?",
+                        (book.name,)).fetchall()
+    return [r for r in rows if (r[1].rstrip("/") + "/" + r[2]).endswith(tail)]
+
+
+def forget_bookinfo(db: Path, book: Path) -> int:
+    """Drop the cached thumbnail and metadata for `book` so KOReader re-extracts them from the rewritten file."""
+    with sqlite3.connect(db, timeout=5) as conn:
+        ids = [r[0] for r in _bookinfo_rows(conn, db, book)]
+        conn.executemany("DELETE FROM bookinfo WHERE bcid = ?", [(i,) for i in ids])
+    return len(ids)
+
+
+def prune_stale_bookinfo(db: Path, books: list[Path], root: Path) -> int:
+    """Drop cache entries for books whose size or mtime no longer match what KOReader extracted from."""
+    backup = root / "bookinfo_cache.sqlite3.bak"
+    if not backup.exists():
+        shutil.copyfile(db, backup)
+    stale = []
+    with sqlite3.connect(db, timeout=5) as conn:
+        for book in books:
+            st = book.stat()
+            stale += [r[0] for r in _bookinfo_rows(conn, db, book) if r[3] != st.st_size or r[4] != int(st.st_mtime)]
+        conn.executemany("DELETE FROM bookinfo WHERE bcid = ?", [(i,) for i in stale])
+    return len(stale)
+
+
 def partial_md5(book: Path) -> str | None:
     """The digest KOReader cached on first open; statistics and KOSync key on it."""
     sdr = sidecar_dir(book)
@@ -207,6 +251,11 @@ def apply(prop: Proposal, library: Path, root: Path, flag: str | None = "verifie
     }
     if stats_db and ("title" in changes or "authors" in changes):
         entry["stats"] = fix_statistics(stats_db, path, old, changes, root)
+    if (changes or cover) and (info_db := find_bookinfo_db(library)):
+        try:
+            forget_bookinfo(info_db, path)
+        except sqlite3.Error as e:
+            entry["bookinfo"] = f"couldn't clear KOReader's cached cover: {e}"
     log(root, entry)
     return prop
 

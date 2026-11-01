@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -648,6 +649,9 @@ class BookMetaApp(App):
                             self.action_drop_custom)
         yield SystemCommand(f"Remove custom metadata from all books ({len(self.custom)})",
                             "Same, for every book in the library that has it", self.action_drop_custom_all)
+        yield SystemCommand("Refresh KOReader thumbnails",
+                            "Clear KOReader's cached covers and metadata for books changed since it last looked (close KOReader first)",
+                            self.action_refresh_thumbnails)
         yield SystemCommand("Compare covers", "Open the comparison sheet and pick a cover (o)", self.action_open_covers)
         yield SystemCommand(f"Filter: {FILTERS[(FILTERS.index(self.filter) + 1) % len(FILTERS)]}",
                             "Cycle all / needs review / anything needing you (f)", self.action_filter)
@@ -758,6 +762,21 @@ class BookMetaApp(App):
 
         self.push_screen(Confirm(f"Remove KOReader custom metadata from {len(self.custom)} book(s)?\n"
                                  "KOReader will show each file's own metadata again. Every file is backed up first."), go)
+
+    def action_refresh_thumbnails(self) -> None:
+        db = store.find_bookinfo_db(self.library)
+        if not db:
+            self.notify("Couldn't find KOReader's bookinfo_cache.sqlite3 near this library.", severity="warning")
+            return
+        if self.dry_run:
+            self.notify("Dry run: not changing KOReader's cache.", severity="warning")
+            return
+        try:
+            n = store.prune_stale_bookinfo(db, [Path(p) for p in self.order], self.root)
+        except (OSError, sqlite3.Error) as e:
+            self.notify(f"Couldn't update KOReader's cache: {e}", severity="error")
+            return
+        self.notify(f"Cleared {n} stale thumbnail(s); KOReader rebuilds them the next time it shows those books.")
 
 
 async def run_headless(library: Path, dry_run: bool, auto_apply: bool, stats_db: Path | None) -> None:
