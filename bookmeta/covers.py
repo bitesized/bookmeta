@@ -24,7 +24,7 @@ SAME_IMAGE_MAX_RATIO_DIFF = 0.04  # a different crop of the same art changes the
 AGREE_MAX_DISTANCE = 14  # loose enough to count two stores' crops of one artwork as agreeing on it
 UPGRADE_FACTOR = 1.4
 # Store artwork from the publisher feeds comes first; Open Library is mostly user-uploaded scans, so it's a last resort.
-SOURCE_TIER = {"apple": 0, "google": 0, "hardcover": 1, "openlibrary": 2}
+SOURCE_TIER = {"apple": 0, "amazon": 0, "google": 0, "hardcover": 1, "openlibrary": 2}
 LAST_RESORT = {"openlibrary"}
 
 # Scoring. Haiku rates each image's appeal 1-10; resolution adds up to RES_POINTS for a cover that fills an
@@ -32,10 +32,14 @@ LAST_RESORT = {"openlibrary"}
 # make it plainly the wrong cover. The current cover gets a small bonus so a change has to be a real improvement.
 SCREEN_HEIGHT = 1800
 RES_POINTS = 4.0
-SOURCE_POINTS = {"apple": 0.5, "google": 0.0, "hardcover": 0.0, "openlibrary": -1.0}
+SOURCE_POINTS = {"apple": 0.5, "amazon": 0.5, "google": 0.0, "hardcover": 0.0, "openlibrary": -1.0}
 PENALTY = {"ok": 0.0, "advert": 2.0, "movie": 3.0, "scan": 3.0, "poor": 3.0, "foreign": 5.0}
 VETO = {"wrong_book", "generic"}
 CURRENT_BONUS = 1.0
+# Taste never excuses a small cover: once a sharp cover with nothing worse than a banner is on offer, anything
+# below MIN_REPLACEMENT_HEIGHT (the current cover included) is out of the running.
+SHARP_HEIGHT = 1200
+ACCEPTABLE = {"ok", "advert"}
 
 
 @dataclass
@@ -194,6 +198,8 @@ def choose(current: CoverInfo | None, options: list[CoverInfo], verdicts: dict[i
     shown = ([current] if current else []) + options
     vs = [(verdicts or {}).get(i, Verdict()) for i in range(len(shown))]
     scored = [(s, i) for i, c in enumerate(shown) if (s := score(c, vs[i], i < off)) is not None]
+    if any(effective_height(c) >= SHARP_HEIGHT and vs[i].problem in ACCEPTABLE for i, c in enumerate(shown) if i >= off):
+        scored = [(s, i) for s, i in scored if effective_height(shown[i]) >= MIN_REPLACEMENT_HEIGHT]
     if not scored:
         return CoverDecision(None, True, "no usable cover"), -1
     # Ties go to the current image, then the better-ranked option.

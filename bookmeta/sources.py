@@ -282,6 +282,31 @@ def _fmt_index(pos) -> str:
     return str(int(f)) if f.is_integer() else str(f)
 
 
+# --------------------------------------------------------------------------- Amazon (cover art only)
+
+
+def isbn10(isbn13: str) -> str | None:
+    """The ISBN-10 for a 978- ISBN-13; 979- numbers have none."""
+    if len(isbn13) != 13 or not isbn13.startswith("978"):
+        return None
+    core = isbn13[3:12]
+    check = (11 - sum((10 - k) * int(d) for k, d in enumerate(core)) % 11) % 11
+    return core + ("X" if check == 10 else str(check))
+
+
+def amazon_covers(isbns: list[str]) -> list[Candidate]:
+    """Amazon has no open search, but its image server gives the publisher's original upload for an ISBN-10
+    (`_SCRM` asks for full size; other modifiers cap it at 500px). An unknown ISBN returns a 1x1 GIF, which
+    the cover checks throw away, so no lookup is needed first."""
+    out = []
+    for i in isbns:
+        if (i10 := isbn10(i)):
+            c = Candidate(source="amazon", isbns=[i], by_isbn=True)
+            c.cover_urls.append(f"https://m.media-amazon.com/images/P/{i10}.01._SCRMZZZZZZ_.jpg")
+            out.append(c)
+    return out
+
+
 SOURCES = {"openlibrary": openlibrary, "google": google, "apple": apple, "hardcover": hardcover}
 
 

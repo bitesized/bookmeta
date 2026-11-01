@@ -406,6 +406,9 @@ async def analyze(path: Path, ctx: Context) -> Proposal:
         searched = cover_title == title_for_lookup and not any(c.source == "apple" and c.by_isbn for c in cands)
         extra = [c for c in await sources.more_covers(ctx.http, cover_title, authors[0] if authors else "", searched)
                  if _match(cover_title, authors, c)[0]]
+        # The book's own ISBNs first, then the editions the catalogues matched.
+        known = list(dict.fromkeys([*isbns, *(i for c in matched for i in c.isbns)]))
+        extra += sources.amazon_covers([i for i in known if sources.isbn10(i)][:5])
         urls = list(dict.fromkeys((u, c.source) for c in matched + extra for u in c.cover_urls))
         primary = [(u, s) for u, s in urls if s not in covers.LAST_RESORT][:15]
         fetched = [f for f in await asyncio.gather(*(covers.fetch(ctx.http, u, s) for u, s in primary)) if f]
@@ -413,7 +416,7 @@ async def analyze(path: Path, ctx: Context) -> Proposal:
             fallback = [(u, s) for u, s in urls if s in covers.LAST_RESORT][:4]
             fetched += [f for f in await asyncio.gather(*(covers.fetch(ctx.http, u, s) for u, s in fallback)) if f]
         pool = covers.eligible(current_cover, fetched)
-        options = covers.distinct(pool)[:6]
+        options = covers.distinct(pool)[:8]
         verdicts = None
         if options and ctx.haiku and ctx.haiku.available:
             shown = ([current_cover] if current_cover else []) + options

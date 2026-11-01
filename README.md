@@ -110,10 +110,12 @@ a once-over and compares the covers. Each book ends up in one of these states:
 
 - **Missing fields** are filled: description, series, ISBN, publisher, date, language, subjects.
 - **Covers** are gathered from Apple Books (US and UK storefronts, searched by title as well as ISBN so other
-  editions show up), Google Books and Hardcover at full size; Open Library is used only when nothing else
-  has art. Searches use the catalogue's spelling of the title, so a misspelled file title still finds
-  covers. Each candidate is checked for real sharpness: one blown up from a much smaller image counts as
-  half its height and is marked "soft". Covers are stored at most 2000px tall.
+  editions show up), Google Books, Hardcover and Amazon at full size; Open Library is used only when nothing
+  else has art. Amazon is looked up by ISBN through its image server (the book's own ISBN plus the edition
+  ISBNs the catalogues returned), never by scraping its search. Searches use the catalogue's spelling of the
+  title, so a misspelled file title still finds covers. Kobo isn't searched: it has no public API and its
+  store blocks automated requests. Each candidate is checked for real sharpness: one blown up from a much
+  smaller image counts as half its height and is marked "soft". Covers are stored at most 2000px tall.
 - **Covers are replaced automatically** only by a *noticeably sharper copy of the same artwork*, or when the
   current cover is missing or tiny and the new one is clean store art backed by an ISBN match or a second
   source. A different edition's artwork always goes to review.
@@ -121,7 +123,9 @@ a once-over and compares the covers. Each book ends up in one of these states:
   side by side, flags movie/TV tie-ins, streaming adverts, foreign editions, placeholders, wrong books, scans
   and poor images, and scores each one's artwork from 1 to 10. bookmeta adds points for real resolution
   and source, takes points off for flags (a wrong book or placeholder is never chosen), and gives the
-  current cover a small bonus so it only changes for something clearly better. Without a key, a current cover of
+  current cover a small bonus so it only changes for something clearly better. Once any acceptable
+  candidate is 1200px or taller, every image under 1000px (the current cover included) is out of the
+  running, so a small cover is never kept or chosen over a sharp one. Without a key, a current cover of
   600px or more is kept.
 - **Descriptions** are split into paragraphs. Praise quotes, bestseller/award banners, film/TV tie-ins,
   "about the author", pasted first chapters and repeated paragraphs are removed: rules first, then Jev
